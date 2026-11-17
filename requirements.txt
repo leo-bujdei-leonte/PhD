@@ -1,0 +1,6 @@
+# Subprojects
+-r ucs-bench/requirements.txt
+
+# Dev tools
+ruff
+mypy

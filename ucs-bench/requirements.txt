@@ -1,0 +1,4 @@
+# inspect_ucsbench.py (stats/list/show use only the standard library; `play` needs these)
+# Needs a GUI build of OpenCV (opencv-python, not opencv-python-headless).
+opencv-python>=4.5
+numpy>=1.21

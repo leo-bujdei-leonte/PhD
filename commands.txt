@@ -1,0 +1,2 @@
+# logging in to ECDF
+ssh -i C:\Users\tudor/.ssh/id_ed25519 -J s2992811-infk8s@eidf-gateway.epcc.ed.ac.uk s2992811-infk8s@10.24.7.178
