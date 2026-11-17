@@ -4,10 +4,13 @@ ssh -i C:\Users\tudor/.ssh/id_ed25519 -J s2992811-infk8s@eidf-gateway.epcc.ed.ac
 # EIDF operations
 * k8s namespace: eidf029ns
 * kueue queue: eidf029ns-user-queue 
-* wip job name: jobtest-kx6sx
+* wip job name: ucs-bench-test-7cnlm
 kubectl get queue  # lists number of pending jobs
 kubectl -n eidf029ns get jobs  # list jobs
 kubectl -n eidf029ns create -f <job.yaml-path>  # queue job
 kubectl -n eidf029ns describe job <job-name>
 kubectl logs <job-name>
 kubectl delete job <job-name>
+
+# download from HF
+hf download <org>/<repo> --local-dir <local-dir>

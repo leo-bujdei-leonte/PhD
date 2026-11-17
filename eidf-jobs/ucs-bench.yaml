@@ -1,0 +1,214 @@
+# UCS-Bench / DirectMe GPU smoke test.
+#
+# Runs the parts of the UCS-Bench README setup that could not run on the login VM
+# (no GPU; the 4.8 GB Scal3R checkpoint load was OOM-killed there):
+#   1. GPU / CUDA sanity check
+#   2. toy pipeline           (examples/run_real_pipeline.py --toy)
+#   3. checkpoint loading     (SAM2, YOLO-World, Scal3R, SALAD, Depth-Anything-3)
+#   4. README "Option B"      (Depth-Anything-3 + YOLO-World + SAM2 on video/indoor_demo.mp4)
+#   5. run_pipeline.sh flow   (Scal3R backend + YOLO-World + SAM2 on video/indoor_demo.mp4)
+#
+# The login VM's home directory is not visible to pods and this user has no PVC, so the job
+# is self-contained: it clones the same UCS-Bench commit, installs it the same way as the
+# local .venv, and downloads the checkpoints into an emptyDir. Results only survive in the
+# pod logs:   kubectl logs -f job/<name>
+#
+# Submit with:   kubectl create -f PhD/eidf-jobs/ucs-bench.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+ generateName: ucs-bench-test-
+ labels:
+  kueue.x-k8s.io/queue-name:  eidf029ns-user-queue
+  eidf/user: s2992811-infk8s
+spec:
+ completions: 1
+ backoffLimit: 0                    # a retry would redo ~20 min of setup; inspect logs instead
+ activeDeadlineSeconds: 14400       # 4 h hard stop
+ ttlSecondsAfterFinished: 86400     # keep the pod (and its logs) for 24 h after it finishes
+ template:
+  metadata:
+   labels:
+    eidf/user: s2992811-infk8s
+  spec:
+   restartPolicy: Never
+   nodeSelector:
+    eidf029_node: "true"
+    nvidia.com/gpu.present: "true"
+    nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB   # DA3-GIANT + Scal3R need a large card
+   containers:
+   - name: ucs-bench
+     image: pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime   # same torch/CUDA as the local .venv
+     workingDir: /workspace
+     env:
+     - name: UCS_COMMIT
+       value: 13261b047099e52cadc0d69f331838d95cf1bdd5   # commit checked out on the login VM
+     - name: HF_HOME
+       value: /workspace/hf
+     - name: PIP_NO_CACHE_DIR
+       value: "1"
+     - name: PYTHONUNBUFFERED
+       value: "1"
+     - name: DEBIAN_FRONTEND
+       value: noninteractive
+     command: ["/bin/bash", "-c"]
+     args:
+     - |
+       set -euo pipefail
+       step() { echo; echo "================ $* ================"; }
+
+       step "System packages"
+       apt-get update -qq
+       apt-get install -y -qq --no-install-recommends git wget ffmpeg libgl1 libglib2.0-0 >/dev/null
+
+       step "Clone UCS-Bench @ ${UCS_COMMIT}"
+       git clone -q https://github.com/cocowy1/UCS-Bench.git /workspace/UCS-Bench
+       cd /workspace/UCS-Bench
+       git checkout -q "${UCS_COMMIT}"
+       git submodule update --init --recursive
+       git submodule status
+       REPO=$PWD
+
+       step "Python packages"
+       # Pin the image's torch so unpinned deps (xformers in Depth-Anything-3) cannot replace it.
+       cat > /tmp/constraints.txt <<'EOF'
+       torch==2.5.1
+       torchvision==0.20.1
+       torchaudio==2.5.1
+       xformers==0.0.28.post3
+       numpy<2
+       EOF
+       sed -i 's/^ *//' /tmp/constraints.txt
+       PIP="pip install -q -c /tmp/constraints.txt"
+       $PIP -e ".[video,perception,viz,api,vlm]"
+       $PIP -e third_party/Depth-Anything-3 -e third_party/Scal3R
+       SAM2_BUILD_CUDA=0 $PIP --no-build-isolation -e third_party/sam2
+       # Undeclared runtime deps: addict (Depth-Anything-3), Ultralytics CLIP (YOLO-World text encoder).
+       $PIP addict==2.4.0 huggingface_hub \
+         "clip @ git+https://github.com/ultralytics/CLIP.git@81ff68ed7ffcac3b40484c914f104f816757308d"
+
+       # Upstream configs hard-code the authors' paths; point them at this clone.
+       sed -i "s#/data/ywang/my_projects/VideoUnderstanding/Directme#${REPO}#g" configs/scal3r/*.yaml
+       grep -n "${REPO}" configs/scal3r/*.yaml
+
+       step "Checkpoints"
+       mkdir -p ckpts/{sam2,yolo,scal3r,depth_anything_3}
+       wget -q -O ckpts/sam2/sam2.1_hiera_tiny.pt https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt
+       wget -q -O ckpts/yolo/yolov8s-worldv2.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-worldv2.pt
+       wget -q -O ckpts/scal3r/dino_salad.ckpt https://github.com/serizba/salad/releases/download/v1.0.0/dino_salad.ckpt
+       hf download xbillowy/Scal3R scal3r.pt --local-dir ckpts/scal3r
+       hf download depth-anything/DA3NESTED-GIANT-LARGE-1.1 --local-dir ckpts/depth_anything_3/DA3NESTED-GIANT-LARGE-1.1
+       du -sh ckpts/*
+
+       # ---------------- tests: run all, report each, fail the job if any failed ----------------
+       declare -A RESULT
+       run_test() {
+         local name=$1; shift
+         step "TEST: ${name}"
+         local t0=$SECONDS
+         if "$@"; then RESULT[$name]="PASS ($((SECONDS - t0))s)"; else RESULT[$name]="FAIL ($((SECONDS - t0))s)"; fi
+       }
+
+       test_gpu() {
+         nvidia-smi
+         python -c "import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0))"
+       }
+
+       test_toy() {
+         python examples/run_real_pipeline.py --toy --out runs/toy && ls runs/toy
+       }
+
+       test_ckpts() {
+         python - <<'EOF'
+       import torch
+       from safetensors import safe_open
+       for p in ["ckpts/sam2/sam2.1_hiera_tiny.pt", "ckpts/yolo/yolov8s-worldv2.pt",
+                 "ckpts/scal3r/scal3r.pt", "ckpts/scal3r/dino_salad.ckpt"]:
+           torch.load(p, map_location="cpu", weights_only=False)
+           print("loaded", p)
+       with safe_open("ckpts/depth_anything_3/DA3NESTED-GIANT-LARGE-1.1/model.safetensors", "pt") as f:
+           print("loaded DA3 safetensors,", len(list(f.keys())), "tensors")
+       EOF
+       }
+
+       test_option_b() {
+         mkdir -p frames/demo
+         ffmpeg -loglevel error -y -i video/indoor_demo.mp4 -vf fps=1 frames/demo/frame_%06d.jpg
+         echo "extracted $(ls frames/demo | wc -l) frames"
+         python examples/run_real_pipeline.py \
+           --frames frames/demo \
+           --out runs/demo \
+           --classes "cup,phone,bottle,laptop,chair,table,sink,fridge,door,bag,book" \
+           --question "What objects are around me? Where are they?" \
+           --language en \
+           --device cuda \
+           --depth-model ckpts/depth_anything_3/DA3NESTED-GIANT-LARGE-1.1 \
+           --yolo-weights ckpts/yolo/yolov8s-worldv2.pt \
+           --sam2-checkpoint ckpts/sam2/sam2.1_hiera_tiny.pt \
+           --sam2-config configs/sam2.1/sam2.1_hiera_t.yaml
+         ls -la runs/demo
+         test -s runs/demo/scene_graph.json
+       }
+
+       test_scal3r() {
+         local W=runs/scal3r_demo
+         python -m directme.demo \
+           --mode rule \
+           --backend scal3r \
+           --input-mode from_perception \
+           --video video/indoor_demo.mp4 \
+           --work-dir "$W" \
+           --frame-dump-dir "$W/frames" \
+           --run-dir "$W/directme_mapping_run" \
+           --perception-artifact-dir "$W/perception_artifacts" \
+           --target-fps 1 \
+           --chunk-size 60 \
+           --device cuda:0 \
+           --qa-json '' \
+           --use-sam2 \
+           --sam2-checkpoint ckpts/sam2/sam2.1_hiera_tiny.pt \
+           --sam2-config configs/sam2.1/sam2.1_hiera_t.yaml \
+           --yolo-weights ckpts/yolo/yolov8s-worldv2.pt \
+           --scal3r-config configs/scal3r/scal3r.yaml \
+           --scal3r-checkpoint ckpts/scal3r/scal3r.pt \
+           --output-json "$W/qa_results.json"
+         ls -la "$W" "$W/directme_mapping_run"
+         test -s "$W/directme_mapping_run/scene_graph.json"
+       }
+
+       set +e
+       run_test "1 gpu"                   test_gpu
+       run_test "2 toy pipeline"          test_toy
+       run_test "3 checkpoint loading"    test_ckpts
+       run_test "4 README option B (DA3)" test_option_b
+       run_test "5 Scal3R pipeline"       test_scal3r
+       set -e
+
+       step "SUMMARY"
+       fail=0
+       while IFS= read -r k; do
+         echo "  ${k}: ${RESULT[$k]}"
+         [[ ${RESULT[$k]} == FAIL* ]] && fail=1
+       done < <(printf '%s\n' "${!RESULT[@]}" | sort)
+       exit $fail
+     resources:
+      requests:
+       cpu: 16
+       memory: '64Gi'
+      limits:
+       cpu: 16
+       memory: '96Gi'
+       nvidia.com/gpu: 1
+     volumeMounts:
+     - name: workspace
+       mountPath: /workspace
+     - name: dshm
+       mountPath: /dev/shm
+   volumes:
+   - name: workspace
+     emptyDir:
+      sizeLimit: 100Gi
+   - name: dshm
+     emptyDir:
+      medium: Memory
+      sizeLimit: 16Gi
