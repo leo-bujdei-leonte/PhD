@@ -1,0 +1,61 @@
+# CPU-only setup of the UCS-Bench PVC: repo, Python env, checkpoints, dataset, Qwen3-VL
+# weights and the converted question files. Idempotent; rerun it if it fails part-way.
+# Runs without a GPU so no GPU sits idle during ~150 GB of downloads.
+#
+#   kubectl create configmap s2992811-ucs-bench-scripts --from-file=PhD/ucs-bench/k8s/scripts
+#   kubectl create -f PhD/ucs-bench/k8s/prepare.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+ generateName: ucs-bench-prepare-
+ labels:
+  kueue.x-k8s.io/queue-name:  eidf029ns-user-queue
+  eidf/user: s2992811-infk8s
+spec:
+ completions: 1
+ backoffLimit: 2                    # resumable, so a retry continues the downloads
+ activeDeadlineSeconds: 43200
+ ttlSecondsAfterFinished: 86400
+ template:
+  metadata:
+   labels:
+    eidf/user: s2992811-infk8s
+  spec:
+   restartPolicy: Never
+   nodeSelector:
+    general_node: "true"
+    profiling_node: "false"
+   containers:
+   - name: prepare
+     image: pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime   # same image as the GPU jobs
+     command: ["/bin/bash", "/scripts/prepare.sh"]
+     env:
+     - name: UCS_COMMIT
+       value: 13261b047099e52cadc0d69f331838d95cf1bdd5
+     - name: HF_HOME
+       value: /pvc/hf
+     - name: PIP_NO_CACHE_DIR
+       value: "1"
+     - name: PYTHONUNBUFFERED
+       value: "1"
+     - name: DEBIAN_FRONTEND
+       value: noninteractive
+     resources:
+      requests:
+       cpu: 3
+       memory: '16Gi'
+      limits:
+       cpu: 3
+       memory: '32Gi'
+     volumeMounts:
+     - name: pvc
+       mountPath: /pvc
+     - name: scripts
+       mountPath: /scripts
+   volumes:
+   - name: pvc
+     persistentVolumeClaim:
+      claimName: s2992811-ucs-bench
+   - name: scripts
+     configMap:
+      name: s2992811-ucs-bench-scripts

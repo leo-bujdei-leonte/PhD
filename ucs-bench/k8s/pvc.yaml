@@ -1,0 +1,16 @@
+# Persistent storage for the UCS-Bench evaluation (from /opt/infk8s/templates/pvc.yml).
+# Holds the repo, Python env, checkpoints, dataset (~118 GiB), Qwen3-VL weights, extracted
+# frames, scene graphs and results.   kubectl create -f PhD/ucs-bench/k8s/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+ name: s2992811-ucs-bench
+ labels:
+   eidf/user: s2992811-infk8s
+spec:
+ accessModes:
+  - ReadWriteMany
+ resources:
+  requests:
+   storage: 400Gi
+ storageClassName: csi-cephfs-sc

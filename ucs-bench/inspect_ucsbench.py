@@ -28,9 +28,20 @@ Player controls (`play`)
     n / p          jump to next / previous question timestamp
     [ / ]          slower / faster playback (0.25x .. 8x)
     a              toggle answer reveal
+    g              toggle model answers (with --gen)
     e              toggle evidence-span overlay
     mouse click    seek by clicking on the timeline bar
     q / Esc        quit
+
+Generations (`--gen results.json`, for list / show / play)
+--------------------------------------------------------
+Load the output json of evaluate_ucsbench_vlm.py to show the model's answer
+for each question and whether it is correct: `list` adds a per-video accuracy
+column, `show` marks the model's option with '>' and prints CORRECT/WRONG, and
+`play` shows the model answer in the side panel (correctness and green/red
+question ticks only while the answer is revealed, so you can still quiz yourself).
+
+    python ./ucs-bench/inspect_ucsbench.py show 01169 --gen ../ucs-bench-results/2026-11-18/subset_directme_qwen3vl.json
 
 On the timeline, evidence spans of the current question are drawn in green and
 question timestamps as yellow ticks. When playback crosses a question timestamp
@@ -91,6 +102,86 @@ class Evidence:
 
 
 @dataclass
+class Prediction:
+    letter: str | None  # parsed answer letter (None if unparsable)
+    raw: str  # raw model output
+    correct: bool | None
+    gt_letter: str | None  # ground truth according to the generation file
+
+    @classmethod
+    def from_json(cls, d: dict) -> Prediction:
+        gt = d.get("gt_idx")
+        return cls(
+            letter=d.get("predicted_letter"),
+            raw=str(d.get("raw_answer") or ""),
+            correct=d.get("correct"),
+            gt_letter="ABCDE"[int(gt)] if isinstance(gt, int) and 0 <= gt < 5 else None,
+        )
+
+    def verdict(self) -> str:
+        if self.correct is None:
+            return "UNSCORED"
+        return "CORRECT" if self.correct else "WRONG"
+
+
+def _norm(s: str) -> str:
+    return " ".join(str(s).split()).lower()
+
+
+class Generations:
+    """Model answers from an evaluate_ucsbench_vlm.py output json.
+
+    Predictions carry no qid, so they are matched to dataset questions by
+    (video_uid, query_timestamp, question text), falling back to the question
+    text with the closest timestamp (<= 2 s) for messy annotation timestamps.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        d = json.loads(self.path.read_text(encoding="utf-8"))
+        self.model = d.get("model") or self.path.stem
+        self.summary = d
+        self.by_vid: dict[str, list[dict]] = collections.defaultdict(list)
+        for p in d.get("predictions") or []:
+            self.by_vid[str(p.get("video_uid", "")).strip()].append(p)
+        self.unmatched: dict[str, list[dict]] = {}
+
+    def attach(self, uid: str, qs: list[Question]) -> None:
+        left = list(self.by_vid.get(uid.strip(), []))
+        # pass 1: exact timestamp + question text
+        for q in qs:
+            for i, p in enumerate(left):
+                if (
+                    q.t is not None
+                    and abs(float(p.get("query_timestamp", -1e9)) - q.t) < 0.01
+                    and _norm(p.get("question", "")) == _norm(q.question)
+                ):
+                    q.pred = Prediction.from_json(left.pop(i))
+                    break
+        # pass 2: same text, nearest timestamp
+        for q in qs:
+            if q.pred is not None:
+                continue
+            cands = [
+                (abs(float(p.get("query_timestamp", 0)) - (q.t or 0)), i)
+                for i, p in enumerate(left)
+                if _norm(p.get("question", "")) == _norm(q.question)
+            ]
+            if cands and min(cands)[0] <= 2.0:
+                q.pred = Prediction.from_json(left.pop(min(cands)[1]))
+        self.unmatched[uid] = left
+
+    def videos(self) -> set[str]:
+        return set(self.by_vid)
+
+
+def score(qs: list[Question]) -> tuple[int, int]:
+    """(#correct, #scored) over questions that have a prediction."""
+    scored = [q.pred for q in qs if q.pred is not None and q.pred.correct is not None]
+    return sum(bool(p.correct) for p in scored), len(scored)
+
+
+@dataclass
 class Question:
     qid: str
     category: str
@@ -102,6 +193,7 @@ class Question:
     answer: str
     evidence: list[Evidence] = field(default_factory=list)
     raw: dict = field(default_factory=dict, repr=False)
+    pred: Prediction | None = None  # model answer, if a generation file is loaded
 
     @classmethod
     def from_json(cls, d: dict) -> Question:
@@ -137,6 +229,7 @@ class Dataset:
         if not self.root.is_dir():
             sys.exit(f"Dataset root not found: {self.root}  (use --root)")
         self.qa_dir = self.root / "QAs"
+        self.gen: Generations | None = None
 
     def video_uids(self) -> list[str]:
         meta = self.root / "metadata.jsonl"
@@ -162,7 +255,10 @@ class Dataset:
         if not p.exists():
             return []
         qs = [Question.from_json(d) for d in json.loads(p.read_text(encoding="utf-8"))]
-        return sorted(qs, key=lambda q: (q.t is None, q.t or 0.0))
+        qs = sorted(qs, key=lambda q: (q.t is None, q.t or 0.0))
+        if self.gen is not None:
+            self.gen.attach(uid, qs)
+        return qs
 
     def resolve(self, uid: str) -> str:
         """Allow unique prefixes, e.g. `play 0031` -> '0031d268-...'."""
@@ -237,8 +333,15 @@ def cmd_stats(ds: Dataset, args) -> None:
 
 def cmd_list(ds: Dataset, args) -> None:
     qas = set(ds.qa_uids())
-    print(f"{'video_uid':40s} {'#q':>4s} {'length':>9s}  categories")
+    gen = ds.gen
+    if gen:
+        print(f"generation: {gen.path}  model: {gen.model}")
+    gen_hdr = f" {'gen':>12s}" if gen else ""
+    print(f"{'video_uid':40s} {'#q':>4s} {'length':>9s}{gen_hdr}  categories")
+    tot_c = tot_n = 0
     for uid in ds.video_uids():
+        if gen and args.gen_only and uid not in gen.videos():
+            continue
         qs = ds.questions(uid) if uid in qas else []
         if args.category and not any(
             args.category.lower() in q.category.lower() for q in qs
@@ -246,29 +349,73 @@ def cmd_list(ds: Dataset, args) -> None:
             continue
         length = qs[0].raw.get("video_length", "") if qs else ""
         cats = collections.Counter(q.category.split()[0] for q in qs)
+        gen_col = ""
+        if gen:
+            c, n = score(qs)
+            tot_c, tot_n = tot_c + c, tot_n + n
+            gen_col = f" {f'{c}/{n} {100 * c / n:3.0f}%' if n else '-':>12s}"
         print(
-            f"{uid:40s} {len(qs):4d} {length:>9s}  "
+            f"{uid:40s} {len(qs):4d} {length:>9s}{gen_col}  "
             + " ".join(f"{k}:{v}" for k, v in cats.most_common())
         )
+    if gen:
+        lost = sum(len(v) for v in gen.unmatched.values()) + sum(
+            len(v) for u, v in gen.by_vid.items() if u not in gen.unmatched
+        )
+        acc = f"{tot_c}/{tot_n} = {100 * tot_c / tot_n:.1f}%" if tot_n else "-"
+        print(f"\ngeneration accuracy over listed videos: {acc}")
+        if lost and not args.category:
+            print(f"predictions not matched to any listed question: {lost}")
 
 
 def cmd_show(ds: Dataset, args) -> None:
     uid = ds.resolve(args.uid)
     qs = ds.questions(uid)
-    print(f"{uid}  ({len(qs)} questions)  video: {ds.video_path(uid)}\n")
+    gen = ds.gen
+    print(f"{uid}  ({len(qs)} questions)  video: {ds.video_path(uid)}")
+    if gen:
+        c, n = score(qs)
+        acc = (
+            f"{c}/{n} correct ({100 * c / n:.1f}%)" if n else "no matching predictions"
+        )
+        print(f"model: {gen.model}  -- {acc}")
+        print("legend: * ground truth, > model answer")
+    print()
     w = textwrap.TextWrapper(width=110, initial_indent="    ", subsequent_indent="    ")
     for q in qs:
+        if gen and args.wrong and (q.pred is None or q.pred.correct is not False):
+            continue
+        verdict = f"  [{q.pred.verdict()}]" if q.pred else ""
         print(
-            f"[{fmt_ts(q.t) if q.t is not None else '??:??:??'}] {q.qid}  -- {q.category} / {q.subcategory}"
+            f"[{fmt_ts(q.t) if q.t is not None else '??:??:??'}] {q.qid}  -- {q.category} / {q.subcategory}{verdict}"
         )
         print(w.fill("Q: " + q.question))
         for k, v in q.options.items():
             mark = "*" if k == q.answer_label else " "
+            if gen:
+                mark += ">" if q.pred and q.pred.letter == k else " "
             print(w.fill(f"{mark}{k}. {v}"))
+        if gen:
+            if q.pred is None:
+                print(w.fill("model: (no prediction)"))
+            else:
+                p = q.pred
+                line = f"model: {p.letter or '?'}  {p.verdict()}"
+                if p.raw.strip() != (p.letter or ""):
+                    line += f"  raw: {p.raw.strip()!r}"
+                if p.gt_letter and p.gt_letter != q.answer_label.strip():
+                    line += f"  (!! generation gt={p.gt_letter}, dataset gt={q.answer_label})"
+                print(w.fill(line))
         for e in q.evidence:
             span = f"{fmt_ts(e.start) if e.start is not None else '?'}-{fmt_ts(e.end) if e.end is not None else '?'}"
             print(w.fill(f"evidence {span}: {e.description}"))
         print()
+    if gen and gen.unmatched.get(uid):
+        print(
+            f"{len(gen.unmatched[uid])} prediction(s) for this video matched no question:"
+        )
+        for u in gen.unmatched[uid]:
+            print(f"    @{u.get('query_timestamp')}  {u.get('question')}")
 
 
 # --------------------------------------------------------------------------- #
@@ -315,6 +462,8 @@ class Player:
         self.autopause = not args.no_autopause
         self.show_answer = args.show_answer
         self.show_evidence = True
+        self.gen = ds.gen
+        self.show_pred = ds.gen is not None
         self.frame: Any = None  # current BGR frame (numpy array) or None
         self.pos = 0  # index of the frame currently held in self.frame
         self.win = f"UCS-Bench | {uid}"
@@ -480,6 +629,24 @@ class Player:
         self._text(
             canvas, f"{len(self.questions)} questions", x0, y, (170, 170, 170), 0.45
         )
+        if self.gen and self.show_pred:
+            c, n = score(self.questions)
+            acc = f"{c}/{n} correct" if self.show_answer else f"{n} answered"
+            y += 18
+            y = (
+                self._wrap(
+                    canvas,
+                    f"model: {self.gen.model} ({acc})",
+                    x0,
+                    y,
+                    cw,
+                    (255, 200, 150),
+                    0.42,
+                    16,
+                    max_lines=2,
+                )
+                - 18
+            )
         y += 26
         if q is None:
             self._text(canvas, "No questions for this video.", x0, y)
@@ -510,12 +677,43 @@ class Player:
         y += 6
         y = self._wrap(canvas, q.question, x0, y, cw, (255, 255, 255), 0.47, 19)
         y += 8
+        pred = q.pred if self.show_pred else None
         for k, v in q.options.items():
             correct = self.show_answer and k == q.answer_label
+            picked = pred is not None and pred.letter == k
             col = (90, 230, 90) if correct else (215, 215, 215)
-            y = self._wrap(canvas, f"{k}. {v}", x0, y, cw, col, 0.43, 17, max_lines=4)
+            if picked and not correct:
+                col = (80, 80, 240) if self.show_answer else (255, 200, 150)
+            y = self._wrap(
+                canvas,
+                f"{'>' if picked else ' '}{k}. {v}",
+                x0,
+                y,
+                cw,
+                col,
+                0.43,
+                17,
+                max_lines=4,
+            )
             y += 3
         y += 6
+        if self.show_pred and self.gen:
+            if pred is None:
+                txt, col = "Model: (no prediction)", (130, 130, 130)
+            elif self.show_answer:
+                txt = f"Model: {pred.letter or '?'}  {pred.verdict()}"
+                if pred.correct is None:
+                    col = (200, 200, 200)
+                else:
+                    col = (90, 230, 90) if pred.correct else (80, 80, 240)
+            else:
+                txt, col = (
+                    f"Model: {pred.letter or '?'}  (press 'a' to check)",
+                    (255, 200, 150),
+                )
+            if pred is not None and pred.raw.strip() != (pred.letter or ""):
+                txt += f"  raw: {pred.raw.strip()}"
+            y = self._wrap(canvas, txt, x0, y, cw, col, 0.47, 19, max_lines=3)
         if self.show_answer:
             y = self._wrap(
                 canvas, f"Answer: {q.answer_label}", x0, y, cw, (90, 230, 90), 0.47, 19
@@ -568,7 +766,7 @@ class Player:
         )
         self._text(
             canvas,
-            "n/p question  [/] speed  a answer  e evid  q quit",
+            "n/p quest  [/] speed  a answer  g model  e evid  q quit",
             x0,
             help_y,
             (120, 120, 120),
@@ -603,6 +801,10 @@ class Player:
         for qq in self.questions:
             if qq.t is not None:
                 col, w = ((0, 220, 255), 2) if qq is q else ((0, 150, 200), 1)
+                if self.show_pred and self.show_answer and qq.pred is not None:
+                    col = {True: (90, 230, 90), False: (80, 80, 240)}.get(
+                        qq.pred.correct, col
+                    )
                 cv2.line(canvas, (X(qq.t), y0 - 6), (X(qq.t), y1 + 2), col, w)
         cv2.line(canvas, (X(self.t), y0 - 8), (X(self.t), y1 + 4), (255, 255, 255), 2)
 
@@ -697,6 +899,8 @@ class Player:
             self.show_answer = not self.show_answer
         elif ch == "e":
             self.show_evidence = not self.show_evidence
+        elif ch == "g" and self.gen is not None:
+            self.show_pred = not self.show_pred
         return True
 
 
@@ -716,6 +920,12 @@ def main(argv=None) -> None:
         help=f"dataset root (default: {DEFAULT_ROOT})",
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
+    gen_p = argparse.ArgumentParser(add_help=False)
+    gen_p.add_argument(
+        "--gen",
+        type=Path,
+        help="generation/results json from evaluate_ucsbench_vlm.py to overlay",
+    )
 
     p = sub.add_parser("stats", help="dataset summary")
     p.add_argument(
@@ -725,18 +935,28 @@ def main(argv=None) -> None:
     )
     p.set_defaults(fn=cmd_stats)
 
-    p = sub.add_parser("list", help="list videos")
+    p = sub.add_parser("list", help="list videos", parents=[gen_p])
+    p.add_argument(
+        "--gen-only",
+        action="store_true",
+        help="with --gen: only videos that have predictions",
+    )
     p.add_argument(
         "--category",
         help="only videos with a question in this category (substring match)",
     )
     p.set_defaults(fn=cmd_list)
 
-    p = sub.add_parser("show", help="print the questions of a video")
+    p = sub.add_parser("show", help="print the questions of a video", parents=[gen_p])
     p.add_argument("uid", help="video uid (unique prefix ok)")
+    p.add_argument(
+        "--wrong",
+        action="store_true",
+        help="with --gen: only wrongly answered questions",
+    )
     p.set_defaults(fn=cmd_show)
 
-    p = sub.add_parser("play", help="replay a video with QA overlays")
+    p = sub.add_parser("play", help="replay a video with QA overlays", parents=[gen_p])
     p.add_argument("uid", help="video uid (unique prefix ok)")
     p.add_argument(
         "--start", type=parse_ts, default=0.0, help="start time, seconds or HH:MM:SS"
@@ -765,7 +985,10 @@ def main(argv=None) -> None:
 
     args = ap.parse_args(argv)
     try:
-        args.fn(Dataset(args.root), args)
+        ds = Dataset(args.root)
+        if getattr(args, "gen", None):
+            ds.gen = Generations(args.gen)
+        args.fn(ds, args)
     except (BrokenPipeError, OSError) as e:  # e.g. `... | head` closed stdout
         if isinstance(e, BrokenPipeError) or getattr(e, "errno", None) == 22:
             sys.stderr.close()

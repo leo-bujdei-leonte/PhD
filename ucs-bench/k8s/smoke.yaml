@@ -13,7 +13,7 @@
 # local .venv, and downloads the checkpoints into an emptyDir. Results only survive in the
 # pod logs:   kubectl logs -f job/<name>
 #
-# Submit with:   kubectl create -f PhD/eidf-jobs/ucs-bench.yaml
+# Submit with:   kubectl create -f PhD/ucs-bench/k8s/smoke.yaml
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -151,7 +151,8 @@ spec:
        }
 
        test_scal3r() {
-         local W=runs/scal3r_demo
+         # Absolute: Scal3R resolves relative paths against third_party/Scal3R, not the cwd.
+         local W="${REPO}/runs/scal3r_demo"
          python -m directme.demo \
            --mode rule \
            --backend scal3r \
@@ -169,8 +170,8 @@ spec:
            --sam2-checkpoint ckpts/sam2/sam2.1_hiera_tiny.pt \
            --sam2-config configs/sam2.1/sam2.1_hiera_t.yaml \
            --yolo-weights ckpts/yolo/yolov8s-worldv2.pt \
-           --scal3r-config configs/scal3r/scal3r.yaml \
-           --scal3r-checkpoint ckpts/scal3r/scal3r.pt \
+           --scal3r-config "${REPO}/configs/scal3r/scal3r.yaml" \
+           --scal3r-checkpoint "${REPO}/ckpts/scal3r/scal3r.pt" \
            --output-json "$W/qa_results.json"
          ls -la "$W" "$W/directme_mapping_run"
          test -s "$W/directme_mapping_run/scene_graph.json"
