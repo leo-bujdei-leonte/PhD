@@ -52,6 +52,14 @@ spec:
        value: /pvc/hf
      - name: PYTHONUNBUFFERED
        value: "1"
+     # The container sees all 124 host CPUs but is limited to 16 (resources below), so
+     # without these PyTorch/OpenMP start ~124 threads and get throttled. Keep = cpu limit.
+     - name: OMP_NUM_THREADS
+       value: "16"
+     - name: MKL_NUM_THREADS
+       value: "16"
+     - name: OPENBLAS_NUM_THREADS
+       value: "16"
      - name: DEBIAN_FRONTEND
        value: noninteractive
      resources:
@@ -114,6 +122,14 @@ spec:
        value: /pvc/hf
      - name: PYTHONUNBUFFERED
        value: "1"
+     # The container sees all 124 host CPUs but is limited to 16 (resources below), so
+     # without these PyTorch/OpenMP start ~124 threads and get throttled. Keep = cpu limit.
+     - name: OMP_NUM_THREADS
+       value: "16"
+     - name: MKL_NUM_THREADS
+       value: "16"
+     - name: OPENBLAS_NUM_THREADS
+       value: "16"
      - name: DEBIAN_FRONTEND
        value: noninteractive
      resources:

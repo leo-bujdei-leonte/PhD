@@ -23,6 +23,9 @@ git submodule update --init --recursive
 git submodule status
 # Upstream configs hard-code the authors' paths.
 sed -i "s#/data/ywang/my_projects/VideoUnderstanding/Directme#${REPO}#g" configs/scal3r/*.yaml
+# Local fix: vectorised SceneGraph.build_edges (identical output; the upstream all-pairs
+# Python loop ran after every chunk and dominated graph-building time). Skipped if applied.
+git apply --reverse --check /scripts/build_edges.patch 2>/dev/null || git apply /scripts/build_edges.patch
 
 step "Python env"
 if [ ! -f /pvc/venv/.complete ]; then

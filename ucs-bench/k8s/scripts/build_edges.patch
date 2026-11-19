@@ -1,0 +1,46 @@
+diff --git a/directme/mapping/scene_graph.py b/directme/mapping/scene_graph.py
+index 6883346..2adfc63 100644
+--- a/directme/mapping/scene_graph.py
++++ b/directme/mapping/scene_graph.py
+@@ -536,16 +536,34 @@ class SceneGraph:
+         return match, "merge"
+ 
+     def build_edges(self, k: int = 5, max_distance_m: float = 2.0) -> None:
++        # Produces exactly the edges of the plain all-pairs loop (every other node within
++        # max_distance_m, stable-sorted by distance, first k), but much faster: that loop
++        # read node.p_world (list -> validated array) twice per pair in Python, ~9 s per
++        # call at ~700 nodes, and the mapping engine calls this after every chunk.
++        # numpy only shortlists candidates; their distances are then recomputed with the
++        # same np.linalg.norm call as before, so filtering, tie order and rounding match.
+         self.edges = []
+         nodes = list(self.nodes.values())
+-        for src in nodes:
++        points = np.stack([node.p_world for node in nodes]) if len(nodes) > 1 else None
++        for i, src in enumerate(nodes):
+             distances: list[tuple[float, EntityNode]] = []
+-            for dst in nodes:
+-                if src.node_id == dst.node_id:
+-                    continue
+-                d = float(np.linalg.norm(src.p_world - dst.p_world))
+-                if d <= max_distance_m:
+-                    distances.append((d, dst))
++            if points is not None:
++                diff = points - points[i]
++                approx = np.sqrt(np.einsum("ij,ij->i", diff, diff))
++                approx[i] = np.inf
++                cutoff = float(max_distance_m)
++                if 0 < k < len(nodes) - 1:
++                    # The true k nearest all lie within the k-th smallest approximate
++                    # distance plus rounding error (summation order differs from norm).
++                    cutoff = min(cutoff, float(np.partition(approx, k - 1)[k - 1]))
++                slack = 1e-9 * max(1.0, abs(cutoff))
++                for j in np.flatnonzero(approx <= cutoff + slack):
++                    dst = nodes[j]
++                    if src.node_id == dst.node_id:
++                        continue
++                    d = float(np.linalg.norm(points[i] - points[j]))
++                    if d <= max_distance_m:
++                        distances.append((d, dst))
+             for d, dst in sorted(distances, key=lambda x: x[0])[:k]:
+                 self.edges.append(
+                     {
