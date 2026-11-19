@@ -3,11 +3,12 @@
     * space ambiguous (how many chairs did I see)
     * semantically ambiguous (which girl are we referring to)
     * duplicate
-    * wrong (how many chairs by the dining table, where is the living room, can i directly touch the broom x2, where is the fire extinguisher)
+    * wrong (how many chairs by the dining table, where is the living room, can i directly touch the broom x2, where is the fire extinguisher, where did i put the white cup)
     * dubious translation and wording (which direction am I relative to the girl -> answer is which direction the girl is relative to me; you're facing the stairs -> face the stairs)
 * issues with spatial reasoning (which hand is holding, where is the charging area, how many turns did i take, where is the bathroom)
 * issues with object recognition (what is the person in front of me holding, how many sculptures have i touched)
 * counting issues (how many people, but also ambiguous)
+* overall accuracy doesn't nearly match the reported accuracy
 
 01106 - sculpture museum
 1 x 'can i touch the sculpture' - answered no but ego already touched it
