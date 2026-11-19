@@ -20,14 +20,15 @@ Sub-commands
 
 Player controls (`play`)
 ------------------------
-    space          pause / resume
+    space          pause / resume (at a stop shared by several questions,
+                   shows the next one first)
     <- / ->        skip back / forward 5 s      (also j / l)
     up / down      skip back / forward 30 s     (also J / L)
     , / .          step one frame back / forward (pauses)
     r              rewind to the start
-    n / p          jump to next / previous question timestamp
+    n / p          jump to next / previous question (one at a time)
     [ / ]          slower / faster playback (0.25x .. 8x)
-    a              toggle answer reveal
+    a              hide / show the correct answer (shown by default)
     g              toggle model answers (with --gen)
     e              toggle evidence-span overlay
     mouse click    seek by clicking on the timeline bar
@@ -39,13 +40,17 @@ Load the output json of evaluate_ucsbench_vlm.py to show the model's answer
 for each question and whether it is correct: `list` adds a per-video accuracy
 column, `show` marks the model's option with '>' and prints CORRECT/WRONG, and
 `play` shows the model answer in the side panel (correctness and green/red
-question ticks only while the answer is revealed, so you can still quiz yourself).
+question ticks only while the answer is revealed; answers are shown by default,
+press 'a' to hide them and quiz yourself).
 
     python ./ucs-bench/inspect_ucsbench.py show 01169 --gen ../ucs-bench-results/2026-11-18/subset_directme_qwen3vl.json
 
 On the timeline, evidence spans of the current question are drawn in green and
 question timestamps as yellow ticks. When playback crosses a question timestamp
-the player auto-pauses (disable with --no-autopause) so you can answer it first.
+the player auto-pauses (disable with --no-autopause) so you can answer it first;
+if several questions share that timestamp, space shows each in turn, then resumes.
+The side panel shows the upcoming question; it switches to the next one on the
+frame after the pause, so the question you stopped at stays visible while paused.
 """
 
 from __future__ import annotations
@@ -53,6 +58,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import math
 import re
 import sys
 import textwrap
@@ -460,14 +466,15 @@ class Player:
         self.speed_i = SPEEDS.index(1.0)
         self.paused = args.start_paused
         self.autopause = not args.no_autopause
-        self.show_answer = args.show_answer
+        self.show_answer = True
         self.show_evidence = True
         self.gen = ds.gen
         self.show_pred = ds.gen is not None
         self.frame: Any = None  # current BGR frame (numpy array) or None
         self.pos = 0  # index of the frame currently held in self.frame
         self.win = f"UCS-Bench | {uid}"
-        self.focus_q: Question | None = None  # question pinned by n/p
+        self.focus_q: Question | None = None  # question pinned by n/p / autopause
+        self.pending_qs: list[Question] = []  # more questions at the current stop
 
         start = args.start
         if args.question:
@@ -511,42 +518,62 @@ class Player:
         return self.pos / self.fps
 
     # ---- question bookkeeping -------------------------------------------- #
+    def _timed_questions(self) -> list[tuple[float, Question]]:
+        """(timestamp, question) for every question that has a timestamp."""
+        return [(q.t, q) for q in self.questions if q.t is not None]
+
     def current_question(self) -> Question | None:
         if self.focus_q is not None:
             return self.focus_q
-        past = [q for q in self.questions if q.t is not None and q.t <= self.t + 1e-6]
-        if past:
-            return past[-1]
-        upcoming = [q for q in self.questions if q.t is not None]
-        return upcoming[0] if upcoming else None
+        timed = self._timed_questions()
+        if not timed:
+            return None
+        # Show the question reached on this very frame (where autopause stops);
+        # from the next frame on, show the upcoming question instead.
+        prev_t = (self.pos - 1) / self.fps
+        upcoming = [q for t, q in timed if t > prev_t + 1e-6]
+        return upcoming[0] if upcoming else timed[-1][1]
 
     def jump_question(self, direction: int) -> None:
-        timed = [(q.t, q) for q in self.questions if q.t is not None]
-        if not timed:
+        # step through questions in order (not by time), so questions sharing a
+        # timestamp are each visited
+        timed = self._timed_questions()
+        qs = [q for _, q in timed]
+        cur = self.current_question()
+        if not timed or cur not in qs:
             return
+        i = qs.index(cur)
+        reached = self.t >= timed[i][0] - 1.0 / self.fps
         if direction > 0:
-            nxt = [tq for tq in timed if tq[0] > self.t + 0.5]
-            t, q = nxt[0] if nxt else timed[-1]
+            i = i + 1 if reached else i  # an upcoming question is the "next" one
         else:
-            prv = [tq for tq in timed if tq[0] < self.t - 0.5]
-            t, q = prv[-1] if prv else timed[0]
+            i = i - 1
+        t, q = timed[min(max(i, 0), len(timed) - 1)]
         self.focus_q = q
-        self.seek(t)
+        # land on the first frame at/after q.t so resuming doesn't autopause on
+        # the same question again
+        self.seek(math.ceil(t * self.fps - 1e-6) / self.fps + 1e-6)
         self.paused = True
 
     # ---- rendering ------------------------------------------------------- #
     def _text(self, img, s, x, y, color=(230, 230, 230), scale=0.5, thick=1):
         cv2 = self.cv2
-        cv2.putText(
-            img,
-            s,
-            (x, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            scale,
-            (0, 0, 0),
-            thick + 2,
-            cv2.LINE_AA,
-        )
+        # Black outline: same stroke width drawn at 1-px offsets. (A thicker
+        # stroke would also widen OpenCV's glyph advance, so the outline would
+        # drift right and leave ghost letters after the text.)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx or dy:
+                    cv2.putText(
+                        img,
+                        s,
+                        (x + dx, y + dy),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        scale,
+                        (0, 0, 0),
+                        thick,
+                        cv2.LINE_AA,
+                    )
         cv2.putText(
             img, s, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA
         )
@@ -730,11 +757,12 @@ class Player:
                 18,
             )
         y += 8
-        if q.evidence and y < self.canvas_h - BAR_H - 40:
+        help_top = self.canvas_h - BAR_H - 10 - 16 * 4  # keep clear of the help
+        if q.evidence and y < help_top - 20:
             self._text(canvas, "Evidence:", x0, y, (120, 255, 120), 0.45)
             y += 18
             for e in q.evidence:
-                if y > self.canvas_h - BAR_H - 20:
+                if y > help_top - 3 * 16:
                     break
                 span = f"{fmt_ts(e.start or 0)}-{fmt_ts(e.end or 0)}"
                 active = (
@@ -755,23 +783,17 @@ class Player:
                 )
                 y += 2
 
-        help_y = self.canvas_h - BAR_H - 10
-        self._text(
-            canvas,
-            "spc pause  <-/-> 5s  up/dn 30s  ,/. frame  r rewind",
-            x0,
-            help_y - 16,
-            (120, 120, 120),
-            0.38,
-        )
-        self._text(
-            canvas,
-            "n/p quest  [/] speed  a answer  g model  e evid  q quit",
-            x0,
-            help_y,
-            (120, 120, 120),
-            0.38,
-        )
+        help_lines = [
+            "spc play/pause (next q at a shared stop)  r rewind  q quit",
+            "<-/-> 5s  up/dn 30s  ,/. frame  click bar: seek",
+            "n/p next/prev question  [/] speed",
+            "a hide/show answer  e evidence"
+            + ("  g model answers" if self.gen else ""),
+        ]
+        help_y = self.canvas_h - BAR_H - 10 - 16 * (len(help_lines) - 1)
+        for line in help_lines:
+            self._text(canvas, line, x0, help_y, (120, 120, 120), 0.38)
+            help_y += 16
 
     def _bar_geom(self):
         return (
@@ -808,24 +830,64 @@ class Player:
                 cv2.line(canvas, (X(qq.t), y0 - 6), (X(qq.t), y1 + 2), col, w)
         cv2.line(canvas, (X(self.t), y0 - 8), (X(self.t), y1 + 4), (255, 255, 255), 2)
 
+    def fit_to_window(self, canvas):
+        """Scale the canvas to the window keeping its aspect ratio, padding with
+        black (letterbox) instead of letting OpenCV stretch it (e.g. fullscreen)."""
+        cv2, np = self.cv2, self.np
+        self._view = (0, 0, 1.0)
+        try:
+            _, _, ww, wh = cv2.getWindowImageRect(self.win)
+        except cv2.error:
+            return canvas
+        H, W = canvas.shape[:2]
+        if ww <= 0 or wh <= 0 or (ww, wh) == (W, H):
+            return canvas
+        s = min(ww / W, wh / H)
+        nw, nh = max(1, round(W * s)), max(1, round(H * s))
+        ox, oy = (ww - nw) // 2, (wh - nh) // 2
+        out = np.zeros((wh, ww, 3), np.uint8)
+        interp = cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR
+        out[oy : oy + nh, ox : ox + nw] = cv2.resize(
+            canvas, (nw, nh), interpolation=interp
+        )
+        self._view = (ox, oy, s)
+        return out
+
     def on_mouse(self, event, x, y, flags, _):
         if event != self.cv2.EVENT_LBUTTONDOWN:
             return
+        ox, oy, s = getattr(self, "_view", (0, 0, 1.0))
+        x, y = (x - ox) / s, (y - oy) / s  # window -> canvas coordinates
         x0, x1, y0, y1 = self._bar_geom()
         if y0 - 12 <= y <= y1 + 8 and x0 <= x <= x1:
-            self.focus_q = None
+            self.focus_q, self.pending_qs = None, []
             self.seek((x - x0) / (x1 - x0) * self.duration)
 
     # ---- main loop ------------------------------------------------------- #
+    def advance(self, skip: int = 0) -> None:
+        """Play forward one (+skip) frame, auto-pausing on question timestamps."""
+        prev_t = self.t
+        if not self.read_next(skip=skip):
+            self.paused = True  # end of video
+            return
+        if not self.autopause:
+            return
+        # pin the question(s) we stopped for (frame drops may have skipped past
+        # the exact frame); space shows the next one sharing this stop before
+        # playback resumes
+        hit = [q for q in self.questions if q.t is not None and prev_t < q.t <= self.t]
+        if hit:
+            self.paused = True
+            self.focus_q, self.pending_qs = hit[0], hit[1:]
+
     def run(self) -> None:
         cv2 = self.cv2
         cv2.namedWindow(self.win, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.win, self.vw + PANEL_W, self.canvas_h)
         cv2.setMouseCallback(self.win, self.on_mouse)
-        q_times = sorted(q.t for q in self.questions if q.t is not None)
         next_tick = time.perf_counter()
         while True:
-            cv2.imshow(self.win, self.render())
+            cv2.imshow(self.win, self.fit_to_window(self.render()))
 
             if self.paused:
                 key = cv2.waitKeyEx(30)
@@ -840,14 +902,7 @@ class Player:
                     next_tick += behind * frame_dt
                 key = cv2.waitKeyEx(max(1, int((next_tick - now) * 1000)))
                 if key == -1:
-                    prev_t = self.t
-                    if not self.read_next(skip=behind):
-                        self.paused = True  # end of video
-                    elif self.autopause and any(
-                        prev_t < qt <= self.t for qt in q_times
-                    ):
-                        self.paused = True
-                        self.focus_q = None
+                    self.advance(skip=behind)
 
             if cv2.getWindowProperty(self.win, cv2.WND_PROP_VISIBLE) < 1:
                 break
@@ -862,6 +917,12 @@ class Player:
         ch = chr(key & 0xFF) if key < 0x10000 and (key & 0xFF) else ""
         if ch in ("q", "\x1b"):
             return False
+        if ch == " " and self.paused and self.pending_qs:
+            # several questions at this stop: show the next before resuming
+            self.focus_q = self.pending_qs.pop(0)
+            return True
+        if ch not in ("a", "e", "g", "[", "]"):  # any navigation drops the queue
+            self.pending_qs = []
         seek_by = None
         if key in KEY_LEFT or ch == "j":
             seek_by = -5
@@ -971,9 +1032,6 @@ def main(argv=None) -> None:
         help="seconds before --question to start (default 10)",
     )
     p.add_argument("--start-paused", action="store_true")
-    p.add_argument(
-        "--show-answer", action="store_true", help="reveal answers from the start"
-    )
     p.add_argument(
         "--no-autopause",
         action="store_true",

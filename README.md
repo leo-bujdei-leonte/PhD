@@ -12,12 +12,13 @@ conda activate phd
 pip install -r requirements.txt
 ```
 
-## Linting and type checking
+## Do before committing
 
 ```bash
 ruff check .
 ruff format .
 mypy .
+pytest
 ```
 
-Run all three before committing. If mypy complains about third-party packages without type stubs, use `mypy --ignore-missing-imports .` or install the suggested `types-*` package.
+If mypy complains about third-party packages without type stubs, use `mypy --ignore-missing-imports .` or install the suggested `types-*` package.

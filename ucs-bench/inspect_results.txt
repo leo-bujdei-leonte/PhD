@@ -1,0 +1,69 @@
+* questions can be
+    * time ambiguous (how many sculptures did I touch)
+    * space ambiguous (how many chairs did I see)
+    * semantically ambiguous (which girl are we referring to)
+    * duplicate
+    * wrong (how many chairs by the dining table, where is the living room, can i directly touch the broom x2, where is the fire extinguisher)
+    * dubious translation and wording (which direction am I relative to the girl -> answer is which direction the girl is relative to me; you're facing the stairs -> face the stairs)
+* issues with spatial reasoning (which hand is holding, where is the charging area, how many turns did i take, where is the bathroom)
+* issues with object recognition (what is the person in front of me holding, how many sculptures have i touched)
+* counting issues (how many people, but also ambiguous)
+
+01106 - sculpture museum
+1 x 'can i touch the sculpture' - answered no but ego already touched it
+2 x same question
+3 same question
+4 x 'how many roped off sculptures'- unclear from this angle
+5 
+6 x same question - could be answered about the other girl
+7 x how many sculptures did i touch - says none
+8 x how many people did i see - answer is 4 but 3 at best?
+9 x same as 5
+10 x
+11 x same question
+12 x
+13 same question
+14 
+15 x same question
+16 x wrong hand
+17
+18 x how many did i touch - now or ever?
+19 x position 
+20 x position
+21 x how many did i touch
+22 x how many people did i see - ambiguous
+23 x same question - model answers correctly based on current frame
+
+01169
+1 x number of people (ambiguous?)
+2 x wrong hand
+3 x which man?
+4 x same question
+5 x
+6 which staff member??
+7 x position
+8 x position
+9 x same as 5
+10 same as 5/6?
+11 
+12 x number of people (wrong evidence)
+13 x 
+14 x same as 7
+15 x same
+16 
+17 x same
+18 x 
+19 x same as 16
+20 x
+21 x same
+22 x how many chairs - ambiguous
+23 x how many chairs - ambiguous
+24 x
+25 x same as 22
+26 x same as 22
+27 x counting
+28 x same counting
+
+2d29b45a
+1 x ambiguous if the front is a different room
+2 is that the living room?

@@ -4,3 +4,4 @@
 # Dev tools
 ruff
 mypy
+pytest
